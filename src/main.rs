@@ -49,8 +49,18 @@ impl HttpRequest {
 
 fn handle_connection(mut stream: TcpStream) {
     if let Ok(Some(request)) = HttpRequest::from_tcp_stream(&mut stream) {
-        match request.uri.as_str() {
+        let uri = request.uri;
+        match uri.as_str() {
             "/" => stream.write("HTTP/1.1 200 OK\r\n\r\n".as_bytes()).unwrap(),
+            _ if uri.starts_with("/echo/") => {
+                let content = &uri["/echo/".len()..];
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                    content.len(),
+                    content
+                );
+                stream.write(response.as_bytes()).unwrap()
+            }
             _ => stream
                 .write("HTTP/1.1 404 Not Found\r\n\r\n".as_bytes())
                 .unwrap(),
