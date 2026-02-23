@@ -1,6 +1,7 @@
 #[allow(unused_imports)]
 use std::net::TcpListener;
 use std::{
+    collections::HashMap,
     io::{Read, Write},
     net::TcpStream,
 };
@@ -12,6 +13,7 @@ enum HttpMethod {
 struct HttpRequest {
     method: HttpMethod,
     uri: String,
+    headers: HashMap<String, String>,
 }
 
 impl HttpRequest {
@@ -27,23 +29,41 @@ impl HttpRequest {
             return Ok(None);
         }
 
-        let request_str = String::from_utf8_lossy(&buffer);
+        let request_str = String::from_utf8_lossy(&buffer[..bytes]);
 
         let mut lines = request_str.lines();
 
-        if let Some(request_line) = lines.next() {
-            let parts: Vec<&str> = request_line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                let method = match parts[0] {
-                    "GET" => HttpMethod::GET,
-                    "POST" => HttpMethod::POST,
-                    _ => return Err("Unsuported method".to_string()),
-                };
-                let uri = parts[1].to_string();
-                return Ok(Some(HttpRequest { method, uri: uri }));
+        let mut headers: HashMap<String, String> = HashMap::new();
+
+        let request_line = lines.next().ok_or("Empty request")?;
+        let mut parts = request_line.split_whitespace();
+        let method_str = parts.next().ok_or("Missing method")?;
+        let uri_str = parts.next().ok_or("Missing uri")?;
+
+        let method = match method_str {
+            "GET" => HttpMethod::GET,
+            "POST" => HttpMethod::POST,
+            _ => return Err("Unsupported method".to_string()),
+        };
+
+        let uri = uri_str.to_string();
+
+        for header_line in lines {
+            if header_line.trim().is_empty() {
+                break;
+            }
+            if let Some((key, value)) = header_line.split_once(':') {
+                headers.insert(key.trim().to_lowercase(), value.trim().to_string());
+            } else {
+                return Err("Malformed header".to_string());
             }
         }
-        Ok(None)
+
+        Ok(Some(HttpRequest {
+            method,
+            uri,
+            headers,
+        }))
     }
 }
 
@@ -51,7 +71,18 @@ fn handle_connection(mut stream: TcpStream) {
     if let Ok(Some(request)) = HttpRequest::from_tcp_stream(&mut stream) {
         let uri = request.uri;
         match uri.as_str() {
-            "/" => stream.write("HTTP/1.1 200 OK\r\n\r\n".as_bytes()).unwrap(),
+            "/" => stream
+                .write_all("HTTP/1.1 200 OK\r\n\r\n".as_bytes())
+                .unwrap(),
+            "/user-agent" => {
+                let user_agent_header = request.headers.get(&"User-agent".to_lowercase()).unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                    user_agent_header.len(),
+                    user_agent_header.to_string()
+                );
+                stream.write_all(response.as_bytes()).unwrap()
+            }
             _ if uri.starts_with("/echo/") => {
                 let content = &uri["/echo/".len()..];
                 let response = format!(
@@ -59,10 +90,10 @@ fn handle_connection(mut stream: TcpStream) {
                     content.len(),
                     content
                 );
-                stream.write(response.as_bytes()).unwrap()
+                stream.write_all(response.as_bytes()).unwrap()
             }
             _ => stream
-                .write("HTTP/1.1 404 Not Found\r\n\r\n".as_bytes())
+                .write_all("HTTP/1.1 404 Not Found\r\n\r\n".as_bytes())
                 .unwrap(),
         };
     }
