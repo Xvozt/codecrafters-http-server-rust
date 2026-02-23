@@ -2,8 +2,10 @@
 use std::net::TcpListener;
 use std::{
     collections::HashMap,
+    fs,
     io::{Read, Write},
     net::TcpStream,
+    path::PathBuf,
     thread,
 };
 
@@ -11,6 +13,7 @@ enum HttpMethod {
     GET,
     POST,
 }
+#[allow(dead_code)]
 struct HttpRequest {
     method: HttpMethod,
     uri: String,
@@ -83,6 +86,27 @@ fn handle_connection(mut stream: TcpStream) {
                     user_agent_header.to_string()
                 );
                 stream.write_all(response.as_bytes()).unwrap()
+            }
+            _ if uri.starts_with("/files/") => {
+                let filename = &uri["/files/".len()..];
+                let env_args: Vec<String> = std::env::args().collect();
+                let dir = PathBuf::from(env_args[2].clone());
+                let path = dir.join(filename);
+
+                match fs::read(&path) {
+                    Ok(bytes) => {
+                        let header = format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n", bytes.len());
+                        stream.write_all(header.as_bytes()).unwrap();
+                        stream.write_all(&bytes).unwrap();
+                        fs::remove_file(&path).unwrap();
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => stream
+                        .write_all("HTTP/1.1 404 Not Found\r\n\r\n".as_bytes())
+                        .unwrap(),
+                    Err(_) => stream
+                        .write_all("HTTP/1.1 500 Internal Server Error\r\n\r\n".as_bytes())
+                        .unwrap(),
+                }
             }
             _ if uri.starts_with("/echo/") => {
                 let content = &uri["/echo/".len()..];
