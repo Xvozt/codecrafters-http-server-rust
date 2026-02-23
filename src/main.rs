@@ -4,6 +4,7 @@ use std::{
     collections::HashMap,
     io::{Read, Write},
     net::TcpStream,
+    thread,
 };
 
 enum HttpMethod {
@@ -108,7 +109,7 @@ fn main() {
     let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
 
     for stream in listener.incoming() {
-        match stream {
+        thread::spawn(move || match stream {
             Ok(_stream) => {
                 println!("accepted new connection");
                 handle_connection(_stream);
@@ -116,6 +117,6 @@ fn main() {
             Err(e) => {
                 println!("error: {}", e);
             }
-        }
+        });
     }
 }
