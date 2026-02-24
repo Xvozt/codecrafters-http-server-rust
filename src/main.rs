@@ -2,7 +2,7 @@
 use std::net::TcpListener;
 use std::{
     collections::HashMap,
-    fs,
+    fs::{self, File},
     io::{Read, Write},
     net::TcpStream,
     path::PathBuf,
@@ -18,6 +18,7 @@ struct HttpRequest {
     method: HttpMethod,
     uri: String,
     headers: HashMap<String, String>,
+    body: Option<Vec<u8>>,
 }
 
 impl HttpRequest {
@@ -52,6 +53,8 @@ impl HttpRequest {
 
         let uri = uri_str.to_string();
 
+        let mut request_body: Option<Vec<u8>> = None;
+
         for header_line in lines {
             if header_line.trim().is_empty() {
                 break;
@@ -63,10 +66,28 @@ impl HttpRequest {
             }
         }
 
+        if let Some(len) = headers.get("content-length") {
+            let body_len = len
+                .parse::<usize>()
+                .map_err(|_| "Invalid content length".to_string())?;
+            let header_end_idx = buffer[..bytes]
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+                .ok_or("Header terminator not found")?;
+            let body_start = header_end_idx + 4;
+            if body_start + body_len <= bytes {
+                let body = &buffer[body_start..(body_start + body_len)];
+                request_body = Some(body.to_vec())
+            } else {
+                return Err("Body reading problem".to_string());
+            }
+        };
+
         Ok(Some(HttpRequest {
             method,
             uri,
             headers,
+            body: request_body,
         }))
     }
 }
@@ -79,7 +100,7 @@ fn handle_connection(mut stream: TcpStream) {
                 .write_all("HTTP/1.1 200 OK\r\n\r\n".as_bytes())
                 .unwrap(),
             "/user-agent" => {
-                let user_agent_header = request.headers.get(&"User-agent".to_lowercase()).unwrap();
+                let user_agent_header = request.headers.get(&"user-agent".to_lowercase()).unwrap();
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
                     user_agent_header.len(),
@@ -87,27 +108,43 @@ fn handle_connection(mut stream: TcpStream) {
                 );
                 stream.write_all(response.as_bytes()).unwrap()
             }
-            _ if uri.starts_with("/files/") => {
-                let filename = &uri["/files/".len()..];
-                let env_args: Vec<String> = std::env::args().collect();
-                let dir = PathBuf::from(env_args[2].clone());
-                let path = dir.join(filename);
+            _ if uri.starts_with("/files/") => match request.method {
+                HttpMethod::GET => {
+                    let filename = &uri["/files/".len()..];
+                    let env_args: Vec<String> = std::env::args().collect();
+                    let dir = PathBuf::from(env_args[2].clone());
+                    let path = dir.join(filename);
 
-                match fs::read(&path) {
-                    Ok(bytes) => {
-                        let header = format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n", bytes.len());
-                        stream.write_all(header.as_bytes()).unwrap();
-                        stream.write_all(&bytes).unwrap();
-                        fs::remove_file(&path).unwrap();
+                    match fs::read(&path) {
+                        Ok(bytes) => {
+                            let header = format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n", bytes.len());
+                            stream.write_all(header.as_bytes()).unwrap();
+                            stream.write_all(&bytes).unwrap();
+                            fs::remove_file(&path).unwrap();
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => stream
+                            .write_all("HTTP/1.1 404 Not Found\r\n\r\n".as_bytes())
+                            .unwrap(),
+                        Err(_) => stream
+                            .write_all("HTTP/1.1 500 Internal Server Error\r\n\r\n".as_bytes())
+                            .unwrap(),
                     }
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => stream
-                        .write_all("HTTP/1.1 404 Not Found\r\n\r\n".as_bytes())
-                        .unwrap(),
-                    Err(_) => stream
-                        .write_all("HTTP/1.1 500 Internal Server Error\r\n\r\n".as_bytes())
-                        .unwrap(),
                 }
-            }
+                HttpMethod::POST => {
+                    let filename = &uri["/files/".len()..];
+                    let directory_arg = get_directory_arg().unwrap();
+                    let dir = PathBuf::from(directory_arg);
+                    let path = dir.join(filename);
+
+                    if let Some(body) = request.body {
+                        let mut file = File::create(path).unwrap();
+                        file.write_all(&body).unwrap();
+                        stream
+                            .write_all("HTTP/1.1 201 Created\r\n\r\n".as_bytes())
+                            .unwrap();
+                    }
+                }
+            },
             _ if uri.starts_with("/echo/") => {
                 let content = &uri["/echo/".len()..];
                 let response = format!(
@@ -122,6 +159,20 @@ fn handle_connection(mut stream: TcpStream) {
                 .unwrap(),
         };
     }
+}
+
+fn get_directory_arg() -> Result<String, String> {
+    let mut args = std::env::args().skip(1); // skip program name
+
+    while let Some(arg) = args.next() {
+        if arg == "--directory" {
+            return args
+                .next()
+                .ok_or("--directory flag provided but no path given".to_string());
+        }
+    }
+
+    Err("--directory flag not found".to_string())
 }
 
 fn main() {
