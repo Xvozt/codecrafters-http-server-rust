@@ -9,6 +9,8 @@ use std::{
     thread,
 };
 
+use flate2::{write::GzEncoder, Compression};
+
 enum HttpMethod {
     GET,
     POST,
@@ -37,13 +39,12 @@ impl HttpResponse {
         buffer.extend_from_slice(b"\r\n");
         let mut headers = self.headers.clone();
 
-        if let Some(body) = &self.body {
-            if !headers
-                .iter()
-                .any(|(k, _v)| k.eq_ignore_ascii_case("content-length"))
-            {
-                headers.push(("Content-Length", body.len().to_string()));
-            }
+        if !headers
+            .iter()
+            .any(|(k, _v)| k.eq_ignore_ascii_case("content-length"))
+        {
+            let len = self.body.as_ref().map_or(0, |b| b.len());
+            headers.push(("Content-Length", len.to_string()));
         }
 
         for (name, value) in headers {
@@ -201,9 +202,6 @@ fn handle_connection(mut stream: TcpStream) {
                             response
                                 .headers
                                 .push(("Content-Type", "application/octet-stream".to_string()));
-                            response
-                                .headers
-                                .push(("Content-Length", bytes.len().to_string()));
                             response.body = Some(bytes);
                             fs::remove_file(&path).unwrap();
                         }
@@ -232,10 +230,17 @@ fn handle_connection(mut stream: TcpStream) {
                 response
                     .headers
                     .push(("Content-Type", "text/plain".to_string()));
-                response
-                    .headers
-                    .push(("Content-Length", content.len().to_string()));
                 response.body = Some(content.as_bytes().to_vec());
+
+                if let Some(encoding) = request.headers.get("accept-encoding") {
+                    if encoding == "gzip" {
+                        response
+                            .headers
+                            .push(("Content-Encoding", "gzip".to_string()));
+                        let encoded_body = gzip_bytes(content.as_bytes());
+                        response.body = Some(encoded_body);
+                    }
+                }
             }
             _ => response.status = StatusCode::NotFound,
         };
@@ -256,6 +261,12 @@ fn get_directory_arg() -> Result<String, String> {
     }
 
     Err("--directory flag not found".to_string())
+}
+
+fn gzip_bytes(input: &[u8]) -> Vec<u8> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(input).unwrap();
+    encoder.finish().unwrap()
 }
 
 fn main() {
