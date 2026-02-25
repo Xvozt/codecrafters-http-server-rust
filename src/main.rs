@@ -21,6 +21,85 @@ struct HttpRequest {
     body: Option<Vec<u8>>,
 }
 
+struct HttpResponse {
+    status: StatusCode,
+    headers: Vec<(&'static str, String)>,
+    body: Option<Vec<u8>>,
+}
+
+impl HttpResponse {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buffer: Vec<u8> = Vec::new();
+        buffer.extend_from_slice(b"HTTP/1.1 ");
+        buffer.extend_from_slice(self.status.code().to_string().as_bytes());
+        buffer.extend_from_slice(b" ");
+        buffer.extend_from_slice(self.status.reason().as_bytes());
+        buffer.extend_from_slice(b"\r\n");
+        let mut headers = self.headers.clone();
+
+        if let Some(body) = &self.body {
+            if !headers
+                .iter()
+                .any(|(k, _v)| k.eq_ignore_ascii_case("content-length"))
+            {
+                headers.push(("Content-Length", body.len().to_string()));
+            }
+        }
+
+        for (name, value) in headers {
+            buffer.extend_from_slice(name.as_bytes());
+            buffer.extend_from_slice(b": ");
+            buffer.extend_from_slice(value.as_bytes());
+            buffer.extend_from_slice(b"\r\n");
+        }
+
+        buffer.extend_from_slice(b"\r\n");
+
+        if let Some(body) = &self.body {
+            buffer.extend_from_slice(body);
+        };
+
+        buffer
+    }
+}
+
+enum StatusCode {
+    OK,
+    Created,
+    NotFound,
+    InternalError,
+}
+
+impl StatusCode {
+    pub fn code(&self) -> u16 {
+        match self {
+            Self::OK => 200,
+            Self::Created => 201,
+            Self::NotFound => 404,
+            Self::InternalError => 500,
+        }
+    }
+
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::OK => "OK",
+            Self::Created => "Created",
+            Self::NotFound => "Not Found",
+            Self::InternalError => "Internal Server Error",
+        }
+    }
+}
+
+impl Default for HttpResponse {
+    fn default() -> Self {
+        Self {
+            status: StatusCode::OK,
+            headers: vec![],
+            body: None,
+        }
+    }
+}
+
 impl HttpRequest {
     fn from_tcp_stream(stream: &mut TcpStream) -> Result<Option<Self>, String> {
         let mut buffer: [u8; 512] = [0; 512];
@@ -94,19 +173,20 @@ impl HttpRequest {
 
 fn handle_connection(mut stream: TcpStream) {
     if let Ok(Some(request)) = HttpRequest::from_tcp_stream(&mut stream) {
+        let mut response = HttpResponse::default();
         let uri = request.uri;
         match uri.as_str() {
-            "/" => stream
-                .write_all("HTTP/1.1 200 OK\r\n\r\n".as_bytes())
-                .unwrap(),
+            "/" => response.status = StatusCode::OK,
             "/user-agent" => {
                 let user_agent_header = request.headers.get(&"user-agent".to_lowercase()).unwrap();
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
-                    user_agent_header.len(),
-                    user_agent_header.to_string()
-                );
-                stream.write_all(response.as_bytes()).unwrap()
+                response.status = StatusCode::OK;
+                response
+                    .headers
+                    .push(("Content-Type", "text/plain".to_string()));
+                response
+                    .headers
+                    .push(("Content-Length", user_agent_header.len().to_string()));
+                response.body = Some(user_agent_header.to_string().as_bytes().to_vec());
             }
             _ if uri.starts_with("/files/") => match request.method {
                 HttpMethod::GET => {
@@ -117,17 +197,20 @@ fn handle_connection(mut stream: TcpStream) {
 
                     match fs::read(&path) {
                         Ok(bytes) => {
-                            let header = format!("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\r\n", bytes.len());
-                            stream.write_all(header.as_bytes()).unwrap();
-                            stream.write_all(&bytes).unwrap();
+                            response.status = StatusCode::OK;
+                            response
+                                .headers
+                                .push(("Content-Type", "application/octet-stream".to_string()));
+                            response
+                                .headers
+                                .push(("Content-Length", bytes.len().to_string()));
+                            response.body = Some(bytes);
                             fs::remove_file(&path).unwrap();
                         }
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => stream
-                            .write_all("HTTP/1.1 404 Not Found\r\n\r\n".as_bytes())
-                            .unwrap(),
-                        Err(_) => stream
-                            .write_all("HTTP/1.1 500 Internal Server Error\r\n\r\n".as_bytes())
-                            .unwrap(),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            response.status = StatusCode::NotFound;
+                        }
+                        Err(_) => response.status = StatusCode::InternalError,
                     }
                 }
                 HttpMethod::POST => {
@@ -139,25 +222,25 @@ fn handle_connection(mut stream: TcpStream) {
                     if let Some(body) = request.body {
                         let mut file = File::create(path).unwrap();
                         file.write_all(&body).unwrap();
-                        stream
-                            .write_all("HTTP/1.1 201 Created\r\n\r\n".as_bytes())
-                            .unwrap();
+                        response.status = StatusCode::Created;
                     }
                 }
             },
             _ if uri.starts_with("/echo/") => {
                 let content = &uri["/echo/".len()..];
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
-                    content.len(),
-                    content
-                );
-                stream.write_all(response.as_bytes()).unwrap()
+                response.status = StatusCode::OK;
+                response
+                    .headers
+                    .push(("Content-Type", "text/plain".to_string()));
+                response
+                    .headers
+                    .push(("Content-Length", content.len().to_string()));
+                response.body = Some(content.as_bytes().to_vec());
             }
-            _ => stream
-                .write_all("HTTP/1.1 404 Not Found\r\n\r\n".as_bytes())
-                .unwrap(),
+            _ => response.status = StatusCode::NotFound,
         };
+        let response_as_bytes = response.to_bytes();
+        stream.write_all(&response_as_bytes).unwrap();
     }
 }
 
