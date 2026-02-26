@@ -173,79 +173,87 @@ impl HttpRequest {
 }
 
 fn handle_connection(mut stream: TcpStream) {
-    if let Ok(Some(request)) = HttpRequest::from_tcp_stream(&mut stream) {
-        let mut response = HttpResponse::default();
-        let uri = request.uri;
-        match uri.as_str() {
-            "/" => response.status = StatusCode::OK,
-            "/user-agent" => {
-                let user_agent_header = request.headers.get(&"user-agent".to_lowercase()).unwrap();
-                response.status = StatusCode::OK;
-                response
-                    .headers
-                    .push(("Content-Type", "text/plain".to_string()));
-                response
-                    .headers
-                    .push(("Content-Length", user_agent_header.len().to_string()));
-                response.body = Some(user_agent_header.to_string().as_bytes().to_vec());
-            }
-            _ if uri.starts_with("/files/") => match request.method {
-                HttpMethod::GET => {
-                    let filename = &uri["/files/".len()..];
-                    let env_args: Vec<String> = std::env::args().collect();
-                    let dir = PathBuf::from(env_args[2].clone());
-                    let path = dir.join(filename);
-
-                    match fs::read(&path) {
-                        Ok(bytes) => {
-                            response.status = StatusCode::OK;
-                            response
-                                .headers
-                                .push(("Content-Type", "application/octet-stream".to_string()));
-                            response.body = Some(bytes);
-                            fs::remove_file(&path).unwrap();
-                        }
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                            response.status = StatusCode::NotFound;
-                        }
-                        Err(_) => response.status = StatusCode::InternalError,
-                    }
-                }
-                HttpMethod::POST => {
-                    let filename = &uri["/files/".len()..];
-                    let directory_arg = get_directory_arg().unwrap();
-                    let dir = PathBuf::from(directory_arg);
-                    let path = dir.join(filename);
-
-                    if let Some(body) = request.body {
-                        let mut file = File::create(path).unwrap();
-                        file.write_all(&body).unwrap();
-                        response.status = StatusCode::Created;
-                    }
-                }
-            },
-            _ if uri.starts_with("/echo/") => {
-                let content = &uri["/echo/".len()..];
-                response.status = StatusCode::OK;
-                response
-                    .headers
-                    .push(("Content-Type", "text/plain".to_string()));
-                response.body = Some(content.as_bytes().to_vec());
-
-                if let Some(encoding) = request.headers.get("accept-encoding") {
-                    if encoding.split(",").any(|e| e.trim() == "gzip") {
+    loop {
+        match HttpRequest::from_tcp_stream(&mut stream) {
+            Ok(Some(request)) => {
+                let mut response = HttpResponse::default();
+                let uri = request.uri;
+                match uri.as_str() {
+                    "/" => response.status = StatusCode::OK,
+                    "/user-agent" => {
+                        let user_agent_header =
+                            request.headers.get(&"user-agent".to_lowercase()).unwrap();
+                        response.status = StatusCode::OK;
                         response
                             .headers
-                            .push(("Content-Encoding", "gzip".to_string()));
-                        let encoded_body = gzip_bytes(content.as_bytes());
-                        response.body = Some(encoded_body);
+                            .push(("Content-Type", "text/plain".to_string()));
+                        response
+                            .headers
+                            .push(("Content-Length", user_agent_header.len().to_string()));
+                        response.body = Some(user_agent_header.to_string().as_bytes().to_vec());
                     }
-                }
+                    _ if uri.starts_with("/files/") => match request.method {
+                        HttpMethod::GET => {
+                            let filename = &uri["/files/".len()..];
+                            let env_args: Vec<String> = std::env::args().collect();
+                            let dir = PathBuf::from(env_args[2].clone());
+                            let path = dir.join(filename);
+
+                            match fs::read(&path) {
+                                Ok(bytes) => {
+                                    response.status = StatusCode::OK;
+                                    response.headers.push((
+                                        "Content-Type",
+                                        "application/octet-stream".to_string(),
+                                    ));
+                                    response.body = Some(bytes);
+                                    fs::remove_file(&path).unwrap();
+                                }
+                                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                    response.status = StatusCode::NotFound;
+                                }
+                                Err(_) => response.status = StatusCode::InternalError,
+                            }
+                        }
+                        HttpMethod::POST => {
+                            let filename = &uri["/files/".len()..];
+                            let directory_arg = get_directory_arg().unwrap();
+                            let dir = PathBuf::from(directory_arg);
+                            let path = dir.join(filename);
+
+                            if let Some(body) = request.body {
+                                let mut file = File::create(path).unwrap();
+                                file.write_all(&body).unwrap();
+                                response.status = StatusCode::Created;
+                            }
+                        }
+                    },
+                    _ if uri.starts_with("/echo/") => {
+                        let content = &uri["/echo/".len()..];
+                        response.status = StatusCode::OK;
+                        response
+                            .headers
+                            .push(("Content-Type", "text/plain".to_string()));
+                        response.body = Some(content.as_bytes().to_vec());
+
+                        if let Some(encoding) = request.headers.get("accept-encoding") {
+                            if encoding.split(",").any(|e| e.trim() == "gzip") {
+                                response
+                                    .headers
+                                    .push(("Content-Encoding", "gzip".to_string()));
+                                let encoded_body = gzip_bytes(content.as_bytes());
+                                response.body = Some(encoded_body);
+                            }
+                        }
+                    }
+                    _ => response.status = StatusCode::NotFound,
+                };
+                let response_as_bytes = response.to_bytes();
+                stream.write_all(&response_as_bytes).unwrap();
             }
-            _ => response.status = StatusCode::NotFound,
-        };
-        let response_as_bytes = response.to_bytes();
-        stream.write_all(&response_as_bytes).unwrap();
+            Ok(None) => break,
+            Err(_) => break,
+        }
     }
 }
 
