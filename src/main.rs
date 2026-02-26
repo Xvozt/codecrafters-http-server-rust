@@ -233,7 +233,7 @@ fn handle_connection(mut stream: TcpStream) {
                 response.body = Some(content.as_bytes().to_vec());
 
                 if let Some(encoding) = request.headers.get("accept-encoding") {
-                    if encoding == "gzip" {
+                    if encoding.split(",").any(|e| e.trim() == "gzip") {
                         response
                             .headers
                             .push(("Content-Encoding", "gzip".to_string()));
