@@ -248,8 +248,21 @@ fn handle_connection(mut stream: TcpStream) {
                     }
                     _ => response.status = StatusCode::NotFound,
                 };
+
+                let should_close = request
+                    .headers
+                    .get("connection")
+                    .map(|v| v.eq_ignore_ascii_case("close"))
+                    .unwrap_or(false);
+
+                if should_close {
+                    response.headers.push(("Connection", "close".to_string()));
+                }
                 let response_as_bytes = response.to_bytes();
                 stream.write_all(&response_as_bytes).unwrap();
+                if should_close {
+                    break;
+                }
             }
             Ok(None) => break,
             Err(_) => break,
